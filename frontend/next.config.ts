@@ -31,6 +31,8 @@ const nextConfig: NextConfig = {
   // Browser talks to Next on one origin; /api/* is forwarded to FastAPI so the
   // httpOnly session cookie stays first-party.
   async rewrites() {
+    // On Vercel, vercel.json routes /api/* to the backend service before Next.js sees it.
+    if (process.env.VERCEL) return [];
     return [{ source: "/api/:path*", destination: `${BACKEND_URL}/api/:path*` }];
   },
   async headers() {

@@ -9,7 +9,7 @@ from collections import defaultdict
 
 import jwt
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -18,6 +18,7 @@ from ..crud import crud_router, paginate
 from ..db import M, get_db, to_dict, utcnow
 from ..security import Ctx, ensure_access, get_ctx, require
 from ..services.core import activity, audit, get_setting, name_map, notify
+from ..services import storage
 from .documents import _safe_name, save_upload
 from .leads import create_lead_record
 
@@ -216,9 +217,7 @@ async def submit_form(slug: str, request: Request, db: Session = Depends(get_db)
                                   mime_type=mime))
         if f.get("type") == "signature" and str(data.get(k, "")).startswith("data:image/png;base64,"):
             raw = base64.b64decode(data[k].split(",", 1)[1])[:2_000_000]
-            rel = f"{form.company_id}/signatures/{uuid.uuid4().hex}.png"
-            (settings.upload_path / rel).parent.mkdir(parents=True, exist_ok=True)
-            (settings.upload_path / rel).write_bytes(raw)
+            rel = storage.save_bytes(f"{form.company_id}/signatures/{uuid.uuid4().hex}.png", raw, "image/png")
             db.add(M.Document(**{**doc_kw, "category": "Signature"}, file_name="signature.png", storage_path=rel,
                               size_bytes=len(raw), mime_type="image/png"))
 
@@ -268,7 +267,7 @@ def public_document(token: str, request: Request, db: Session = Depends(get_db))
     doc = db.get(M.Document, share.document_id)
     if not doc or doc.deleted_at or not doc.storage_path or (doc.expires_at and doc.expires_at < utcnow()):
         raise HTTPException(404, "Document not available")
-    return FileResponse(settings.upload_path / doc.storage_path, media_type=doc.mime_type,
+    return Response(storage.read_bytes(doc.storage_path), media_type=doc.mime_type,
                         headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(doc.file_name)}",
                                  "X-Content-Type-Options": "nosniff"})
 

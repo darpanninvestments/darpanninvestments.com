@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -17,6 +17,7 @@ from ..crud import paginate
 from ..db import M, get_db, parse_dt, to_dict, utcnow
 from ..security import Ctx, can_access_row, ensure_access, require, resolve_company_id, scope_filter
 from ..services.core import activity, audit, name_map
+from ..services import storage
 from ..services.email import send_email_async
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
@@ -35,18 +36,15 @@ async def save_upload(file: UploadFile, company_id: int) -> tuple[str, int, str]
     if ext not in ALLOWED_EXT:
         raise HTTPException(422, f"File type {ext or '(none)'} is not allowed")
     data = await file.read()
-    if len(data) > settings.max_upload_mb * 1024 * 1024:
-        raise HTTPException(413, f"File exceeds {settings.max_upload_mb} MB")
+    if len(data) > settings.max_upload_bytes:
+        raise HTTPException(413, f"File exceeds {settings.max_upload_bytes // (1024 * 1024)} MB")
     if not data:
         raise HTTPException(422, "File is empty")
     if data[:4].startswith(MAGIC_BLOCK):
         raise HTTPException(422, "Executable files are not allowed")
-    rel = Path(str(company_id)) / f"{utcnow():%Y%m}" / f"{uuid.uuid4().hex}{ext}"
-    dest = settings.upload_path / rel
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(data)
     mime = file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream"
-    return str(rel), len(data), mime
+    stored = storage.save_bytes(f"{company_id}/{utcnow():%Y%m}/{uuid.uuid4().hex}{ext}", data, mime)
+    return stored, len(data), mime
 
 
 def _doc_access(db, ctx, doc, action="view"):
@@ -72,7 +70,7 @@ def read_document_bytes(db, ctx, doc_id: int):
     doc = _doc_access(db, ctx, db.get(M.Document, doc_id), "download")
     if not doc.storage_path:
         raise HTTPException(422, f"'{doc.title}' has no file uploaded yet")
-    return doc, (settings.upload_path / doc.storage_path).read_bytes()
+    return doc, storage.read_bytes(doc.storage_path)
 
 
 def _enrich(db, items):
@@ -213,9 +211,8 @@ def download(doc_id: int, request: Request, inline: bool = False, db: Session = 
     if not inline:
         audit(db, ctx, "download", "documents", doc.id, doc.title, company_id=doc.company_id, request=request)
         db.commit()
-    path = settings.upload_path / doc.storage_path
     disp = "inline" if inline else "attachment"
-    return FileResponse(path, media_type=doc.mime_type or "application/octet-stream",
+    return Response(storage.read_bytes(doc.storage_path), media_type=doc.mime_type or "application/octet-stream",
                         headers={"Content-Disposition": f"{disp}; filename*=UTF-8''{quote(doc.file_name)}",
                                  "X-Content-Type-Options": "nosniff"})
 

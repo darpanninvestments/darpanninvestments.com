@@ -67,6 +67,37 @@ Re-apply defaults for system roles: `.venv/bin/python seed.py --reset-permission
 * **Reminders/escalations** – a background loop in the API sends in-app + email reminders for follow-ups,
   visits and meetings, and escalates overdue follow-ups to the TL/manager (Settings → Automation).
 
+## Deploy to Vercel
+One Vercel project, two **Services** (see `vercel.json`): `frontend` (Next.js) and `backend` (FastAPI).
+`/api/*` goes to the backend, everything else to the frontend, functions run in Singapore (`sin1`) next to TiDB.
+
+1. Vercel → Add New → Project → import `darpanninvestments/darpanninvestments.com`, keep Root Directory `./`.
+2. Storage → Create → **Blob** (access: *Private*) → connect it to the project. Make sure the project has
+   `BLOB_READ_WRITE_TOKEN` (Store → Settings → copy the read-write token into the project's environment variables
+   if it was not added automatically). Without it, uploaded documents are lost between requests.
+3. Project → Settings → Environment Variables (Production + Preview):
+
+   | Variable | Value |
+   |---|---|
+   | `DATABASE_URL` | TiDB URL (same as local `.env`) |
+   | `JWT_SECRET` | new random string, 48+ characters |
+   | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM_NAME` | Gmail settings |
+   | `ENVIRONMENT` | `production` |
+   | `PASSWORD_LOGIN_ENABLED` | `false` |
+   | `APP_URL` | your public URL, e.g. `https://crm.darpanninvestments.com` (optional – defaults to the Vercel production URL) |
+   | `CRON_SECRET` | random string (protects `/api/cron/reminders`) |
+   | `BLOB_READ_WRITE_TOKEN` | from step 2 |
+4. Deploy. Sign in with your email code.
+
+**Reminders on Vercel:** there is no always-on process, so follow-up/visit/meeting reminders and escalations run
+whenever someone has the CRM open (the notification bell polls every minute; a database lock guarantees each runs once).
+For reminders when nobody is online, call `GET https://<your-domain>/api/cron/reminders` with header
+`Authorization: Bearer <CRON_SECRET>` every 5 minutes – Vercel Cron on the Pro plan, or a free external scheduler
+(e.g. cron-job.org). The Hobby plan only allows daily Vercel Cron jobs.
+
+**Limits on Vercel:** uploads are capped at 4 MB per file (Vercel request-body limit); rate limits for IPs are
+per instance (per-account email-code limits are enforced in the database).
+
 ## Production notes
 * Set `COOKIE_SECURE=true`, a long random `JWT_SECRET`, and `APP_URL` to the public URL.
 * Run the API with several workers behind a reverse proxy; keep **one** instance running the reminder loop

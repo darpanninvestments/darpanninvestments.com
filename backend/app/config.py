@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -31,6 +32,7 @@ class Settings(BaseSettings):
     session_idle_minutes: int = 240     # sign out after this much inactivity
     trusted_origins: str = ""           # extra comma-separated origins allowed to call the API with cookies
     reminder_interval_seconds: int = 60
+    cron_secret: str = ""  # protects /api/cron/reminders (Vercel Cron sends "Authorization: Bearer <CRON_SECRET>")
 
     seed_admin_email: str = ""
     seed_admin_password: str = ""
@@ -46,15 +48,28 @@ class Settings(BaseSettings):
         )
         connect_args: dict = {}
         if "tidbcloud.com" in (u.hostname or "") or q.get("sslaccept"):
-            connect_args["ssl"] = {"check_hostname": True}
+            import certifi
+            connect_args["ssl"] = {"ca": certifi.where(), "check_hostname": True}
             connect_args["ssl_verify_cert"] = True
             connect_args["ssl_verify_identity"] = True
         return url, connect_args
 
     @property
+    def on_vercel(self) -> bool:
+        return bool(os.getenv("VERCEL"))
+
+    @property
+    def max_upload_bytes(self) -> int:
+        # Vercel Functions accept request bodies up to 4.5 MB
+        mb = min(self.max_upload_mb, 4) if self.on_vercel else self.max_upload_mb
+        return mb * 1024 * 1024
+
+    @property
     def upload_path(self) -> Path:
         p = Path(self.upload_dir)
-        if not p.is_absolute():
+        if self.on_vercel:  # only /tmp is writable (and ephemeral) on Vercel – real files go to Blob
+            p = Path("/tmp/uploads")
+        elif not p.is_absolute():
             p = ROOT / "backend" / p
         p.mkdir(parents=True, exist_ok=True)
         return p
@@ -80,6 +95,10 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     s = Settings()
+    if os.getenv("VERCEL") and "localhost" in s.app_url:
+        prod = os.getenv("VERCEL_PROJECT_PRODUCTION_URL") or os.getenv("VERCEL_URL")
+        if prod:
+            s.app_url = f"https://{prod}"
     if len(s.jwt_secret) < 32:
         raise RuntimeError("JWT_SECRET must be at least 32 random characters")
     return s

@@ -3,7 +3,7 @@ import secrets
 from datetime import timedelta
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -20,7 +20,6 @@ MAX_FAILED = 5                       # failures before the account locks
 LOCK_MINUTES = (15, 30, 60, 240)     # each further lock lasts longer
 ip_login_limit = RateLimiter(30, 600)        # login attempts per IP / 10 min (any account)
 ip_email_limit = RateLimiter(60, 3600)       # codes sent per IP / hour (offices share one IP)
-account_email_limit = RateLimiter(3, 900)    # codes sent per account / 15 min
 otp_verify_limit = RateLimiter(20, 600)      # code checks per IP / 10 min
 GENERIC_LOGIN_ERROR = "Invalid email or password"
 OTP_COOKIE = "crm_otp"  # binds an emailed code to the browser that requested it
@@ -150,9 +149,10 @@ def _send_code(db: Session, request: Request, email: str, purpose: str, response
     user = _find_user(db, email)
     if not user or not user.is_active:
         return  # same response either way – emails can't be enumerated
-    try:
-        account_email_limit.hit(f"{purpose}:{user.id}")
-    except HTTPException:
+    recent = db.scalar(select(func.count()).select_from(M.OtpToken).where(
+        M.OtpToken.user_id == user.id, M.OtpToken.purpose == purpose,
+        M.OtpToken.created_at > utcnow() - timedelta(minutes=15)))
+    if recent >= 3:
         return  # silently drop: avoids mailbox flooding without revealing the account exists
     code = f"{secrets.randbelow(1_000_000):06d}"
     db.execute(update(M.OtpToken).where(M.OtpToken.user_id == user.id, M.OtpToken.purpose == purpose,

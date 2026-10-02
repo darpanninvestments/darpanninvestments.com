@@ -16,6 +16,7 @@ from ..config import settings
 from ..crud import LIST_HANDLERS, build_list_query, paginate
 from ..db import M, SessionLocal, get_db, to_dict, utcnow
 from ..security import Ctx, require, resolve_company_id
+from ..services import storage
 from ..services.core import audit, find_duplicates, get_setting, name_map, notify, set_setting
 from .leads import create_lead_record, enrich_leads, enrich_followups, fu_query, lead_query
 
@@ -37,16 +38,14 @@ PROPERTY_FIELDS = {
     "description": "Description",
 }
 MODULE_FIELDS = {"leads": LEAD_FIELDS, "properties": PROPERTY_FIELDS}
-TMP = settings.upload_path / "_imports"
+IMPORT_PREFIX = "_imports/"
 
 
-def _read_table(path) -> tuple[list[str], list[list]]:
-    name = str(path).lower()
-    if name.endswith((".xlsx", ".xlsm")):
-        wb = load_workbook(path, read_only=True, data_only=True)
+def _read_table(raw: bytes, name: str) -> tuple[list[str], list[list]]:
+    if name.lower().endswith((".xlsx", ".xlsm")):
+        wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
         rows = [list(r) for r in wb.active.iter_rows(values_only=True)]
     else:
-        raw = path.read_bytes()
         text = raw.decode("utf-8-sig", errors="replace")
         rows = list(csv.reader(io.StringIO(text)))
     rows = [r for r in rows if any(c not in (None, "") for c in r)]
@@ -84,12 +83,11 @@ async def preview(file: UploadFile = File(...), module: str = "leads", ctx: Ctx 
     if ext not in ("csv", "xlsx", "xlsm"):
         raise HTTPException(422, "Upload a .csv or .xlsx file")
     data = await file.read()
-    if len(data) > 20 * 1024 * 1024:
-        raise HTTPException(413, "File exceeds 20 MB")
-    TMP.mkdir(parents=True, exist_ok=True)
-    token = f"{uuid.uuid4().hex}.{ext}"
-    (TMP / token).write_bytes(data)
-    headers, rows = _read_table(TMP / token)
+    if len(data) > settings.max_upload_bytes:
+        raise HTTPException(413, f"File exceeds {settings.max_upload_bytes // (1024 * 1024)} MB")
+    headers, rows = _read_table(data, file.filename or f"file.{ext}")
+    # kept in storage between the preview and run steps (may be different serverless instances)
+    token = storage.save_bytes(f"{IMPORT_PREFIX}{uuid.uuid4().hex}.{ext}", data)
     fields = MODULE_FIELDS.get(module, LEAD_FIELDS)
     return {"token": token, "file_name": file.filename, "headers": headers, "total_rows": len(rows),
             "sample": [[str(c) for c in r] for r in rows[:10]],
@@ -132,12 +130,12 @@ def _date(v):
     return None
 
 
-def _run_import(job_id: int, path, ctx_user_id: int):
+def _run_import(job_id: int, stored: str, ctx_user_id: int):
     """Runs in the background with its own DB session."""
     db = SessionLocal()
     try:
         job = db.get(M.ImportJob, job_id)
-        headers, rows = _read_table(path)
+        headers, rows = _read_table(storage.read_bytes(stored), stored)
         mapping, defaults = job.mapping or {}, job.defaults or {}
         cid = job.company_id
         lookup = lambda model, extra=None: {str(n).strip().lower(): i for i, n in db.execute(  # noqa: E731
@@ -272,10 +270,7 @@ def _run_import(job_id: int, path, ctx_user_id: int):
         db.commit()
     finally:
         db.close()
-        try:
-            path.unlink()
-        except OSError:
-            pass
+        storage.delete(stored)
 
 
 @router.post("/api/imports/run")
@@ -284,8 +279,9 @@ def run_import(request: Request, background: BackgroundTasks, data: dict = Body(
     module = data.get("module", "leads")
     if module == "leads" and not ctx.can("leads", "import") and not ctx.can("imports", "import"):
         raise HTTPException(403, "No permission to import leads")
-    path = TMP / re.sub(r"[^a-f0-9.xlsxcv]", "", data.get("token", ""))
-    if not path.exists():
+    stored = str(data.get("token") or "")
+    name_part = stored.removeprefix(storage.BLOB_PREFIX)
+    if not re.fullmatch(r"_imports/[a-f0-9]{32}\.(csv|xlsx|xlsm)", name_part):
         raise HTTPException(422, "Upload expired – please upload the file again")
     mapping = {h: f for h, f in (data.get("mapping") or {}).items() if f}
     targets = set(mapping.values())
@@ -299,7 +295,7 @@ def run_import(request: Request, background: BackgroundTasks, data: dict = Body(
         if not prev or prev.company_id != cid:
             raise HTTPException(422, "Choose the previous import to replace")
         defaults["_replace_job_id"] = prev.id
-    job = M.ImportJob(company_id=cid, module=module, file_name=data.get("file_name") or path.name, mode=mode,
+    job = M.ImportJob(company_id=cid, module=module, file_name=data.get("file_name") or name_part.rsplit("/", 1)[-1], mode=mode,
                       match_key=data.get("match_key"), mapping=mapping, defaults=defaults,
                       total_rows=int(data.get("total_rows") or 0), status="Processing", uploaded_by=ctx.id)
     db.add(job)
@@ -307,7 +303,7 @@ def run_import(request: Request, background: BackgroundTasks, data: dict = Body(
     audit(db, ctx, "import", module, job.id, f"Import #{job.id}: {job.file_name}", {"mode": mode}, company_id=cid,
           request=request)
     db.commit()
-    background.add_task(_run_import, job.id, path, ctx.id)
+    background.add_task(_run_import, job.id, stored, ctx.id)
     return to_dict(job)
 
 

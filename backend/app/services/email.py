@@ -44,4 +44,7 @@ def send_email(to: str, subject: str, html: str, text: str | None = None,
 
 
 def send_email_async(to: str, subject: str, html: str, **kw):
-    _pool.submit(send_email, to, subject, html, **kw)
+    if settings.on_vercel:  # serverless: finish sending before the function returns
+        send_email(to, subject, html, **kw)
+    else:
+        _pool.submit(send_email, to, subject, html, **kw)

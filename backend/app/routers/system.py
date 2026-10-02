@@ -1,8 +1,10 @@
-from fastapi import APIRouter, Body, Depends, Request
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, Request
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..crud import build_list_query, paginate
+from ..services import scheduler
 from ..db import M, get_db, to_dict, utcnow
 from ..security import Ctx, get_ctx, require, scope_filter
 from ..services.core import name_map
@@ -12,7 +14,10 @@ router = APIRouter(tags=["system"])
 
 # ── Notifications ──────────────────────────────────────────────────────────────
 @router.get("/api/notifications")
-def my_notifications(request: Request, db: Session = Depends(get_db), ctx: Ctx = Depends(get_ctx)):
+def my_notifications(request: Request, background: BackgroundTasks, db: Session = Depends(get_db),
+                     ctx: Ctx = Depends(get_ctx)):
+    if settings.on_vercel:  # serverless has no always-on loop: piggyback on active sessions (DB-locked)
+        background.add_task(scheduler.run_if_due)
     p = dict(request.query_params)
     stmt = select(M.Notification).where(M.Notification.user_id == ctx.id)
     if p.get("unread") == "1":

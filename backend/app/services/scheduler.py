@@ -6,10 +6,35 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from ..config import settings
-from ..db import M, SessionLocal, utcnow
+from ..db import M, SessionLocal, engine, utcnow
 from .core import get_setting, notify
 
 log = logging.getLogger("crm.scheduler")
+
+
+def acquire_lock(min_interval_seconds: int = 55) -> bool:
+    """Atomic compare-and-set on a settings row: only one instance runs a tick per interval."""
+    from sqlalchemy import text
+    with engine.begin() as c:
+        # company_id 0 (never a real company) so the (company_id, key) unique index guarantees one lock row
+        c.execute(text("INSERT IGNORE INTO settings (company_id, `key`, value, updated_at) "
+                       "VALUES (0, 'scheduler_lock', NULL, :old)"), {"old": utcnow() - timedelta(days=1)})
+        n = c.execute(text("UPDATE settings SET updated_at=:now WHERE company_id=0 AND `key`='scheduler_lock' "
+                           "AND updated_at < :cutoff"),
+                      {"now": utcnow(), "cutoff": utcnow() - timedelta(seconds=min_interval_seconds)}).rowcount
+    return n == 1
+
+
+def run_if_due() -> bool:
+    """Called opportunistically (while people use the CRM) and by the cron endpoint."""
+    try:
+        if not acquire_lock():
+            return False
+    except Exception:  # noqa: BLE001
+        log.exception("scheduler lock failed")
+        return False
+    run_once()
+    return True
 
 
 def run_once():
@@ -78,6 +103,6 @@ def run_once():
 
 async def loop():
     while True:
-        await asyncio.to_thread(run_once)
+        await asyncio.to_thread(run_if_due)
         await asyncio.sleep(settings.reminder_interval_seconds)
 

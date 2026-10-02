@@ -63,7 +63,13 @@ def validate_password_strength(pw: str, email: str | None = None, name: str | No
 
 
 def client_ip(request: Request) -> str:
-    """uvicorn's proxy-headers support resolves X-Forwarded-For from the trusted Next.js proxy."""
+    """On Vercel the edge sets x-vercel-forwarded-for / x-real-ip (not client-controllable).
+    Locally uvicorn's proxy-headers resolves X-Forwarded-For from the trusted Next.js proxy."""
+    if settings.on_vercel:
+        for h in ("x-vercel-forwarded-for", "x-real-ip", "x-forwarded-for"):
+            v = request.headers.get(h)
+            if v:
+                return v.split(",")[0].strip()
     return (request.client.host if request.client else "") or "unknown"
 
 

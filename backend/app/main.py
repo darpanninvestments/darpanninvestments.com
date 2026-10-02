@@ -19,9 +19,11 @@ from .services import scheduler  # noqa: E402
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    task = asyncio.create_task(scheduler.loop())
+    # Long-running loop only on a normal server; on Vercel reminders run via run_if_due() (see below)
+    task = None if settings.on_vercel else asyncio.create_task(scheduler.loop())
     yield
-    task.cancel()
+    if task:
+        task.cancel()
 
 
 app = FastAPI(title="Darpann Investments – Real Estate CRM API", version="1.0.0", lifespan=lifespan,
@@ -29,7 +31,7 @@ app = FastAPI(title="Darpann Investments – Real Estate CRM API", version="1.0.
               redoc_url=None, openapi_url=None if settings.is_production else "/api/openapi.json")
 
 UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
-MAX_BODY = (settings.max_upload_mb + 5) * 1024 * 1024
+MAX_BODY = settings.max_upload_bytes + 1024 * 1024
 
 
 @app.exception_handler(RequestValidationError)
@@ -54,7 +56,9 @@ async def security(request: Request, call_next):
         if not origin:
             ref = request.headers.get("referer") or ""
             origin = "/".join(ref.split("/")[:3]) if ref.startswith("http") else ""
-        if origin and origin.rstrip("/") not in settings.allowed_origins:
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+        same_host = origin.split("://", 1)[-1].rstrip("/") == host.split(",")[0].strip()
+        if origin and not same_host and origin.rstrip("/") not in settings.allowed_origins:
             return JSONResponse(status_code=403, content={"detail": "Cross-site request blocked"})
     resp = await call_next(request)
     h = resp.headers
@@ -76,6 +80,14 @@ async def security(request: Request, call_next):
 @app.get("/api/health")
 def health():
     return {"ok": True}
+
+
+@app.api_route("/api/cron/reminders", methods=["GET", "POST"])
+def cron_reminders(request: Request):
+    """For Vercel Cron or any external scheduler: Authorization: Bearer <CRON_SECRET>."""
+    if not settings.cron_secret or request.headers.get("authorization") != f"Bearer {settings.cron_secret}":
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    return {"ran": scheduler.run_if_due()}
 
 
 app.include_router(auth.router)
