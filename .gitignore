@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+node_modules/
+.next/
+__pycache__/
+*.pyc
+.venv/
+backend/uploads/
+uploads/
+.DS_Store
+.ruff_cache/
+*.tsbuildinfo
+*.log

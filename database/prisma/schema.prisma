@@ -1,0 +1,829 @@
+// Darpann Investments – Real Estate CRM
+// Single source of truth for the database schema (TiDB Cloud / MySQL).
+// Table + column names are snake_case so the FastAPI (SQLAlchemy) layer maps 1:1.
+//   npm run db:push   -> sync schema to TiDB
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider     = "mysql"
+  url          = env("DATABASE_URL")
+  relationMode = "prisma"
+}
+
+// ───────────────────────────── Organisation & Access ─────────────────────────────
+
+model Company {
+  id         Int       @id @default(autoincrement())
+  name       String    @db.VarChar(191)
+  code       String    @unique @db.VarChar(32)
+  email      String?   @db.VarChar(191)
+  phone      String?   @db.VarChar(32)
+  address    String?   @db.Text
+  logo_url   String?   @db.VarChar(500)
+  timezone   String    @default("Asia/Kolkata") @db.VarChar(64)
+  currency   String    @default("INR") @db.VarChar(8)
+  is_active  Boolean   @default(true)
+  created_at DateTime  @default(now())
+  updated_at DateTime  @updatedAt
+  deleted_at DateTime?
+
+  users     User[]
+  teams     Team[]
+  processes Process[]
+  projects  Project[]
+  leads     Lead[]
+  clients   Client[]
+
+  @@map("companies")
+}
+
+/// level: 100 super_admin, 90 crm_admin, 80 company_admin, 60 manager, 40 team_lead, 20 agent
+model Role {
+  id          Int      @id @default(autoincrement())
+  key         String   @db.VarChar(64)
+  name        String   @db.VarChar(128)
+  description String?  @db.VarChar(500)
+  level       Int      @default(20)
+  company_id  Int?
+  is_system   Boolean  @default(false)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  permissions RolePermission[]
+  users       User[]
+
+  @@unique([key, company_id])
+  @@index([company_id])
+  @@map("roles")
+}
+
+/// action: view|add|edit|delete|assign|import|export|download|share|approve|convert|configure
+/// scope : all|company|team|own|none
+model RolePermission {
+  id      Int    @id @default(autoincrement())
+  role_id Int
+  module  String @db.VarChar(64)
+  action  String @db.VarChar(32)
+  scope   String @default("own") @db.VarChar(16)
+
+  role Role @relation(fields: [role_id], references: [id], onDelete: Cascade)
+
+  @@unique([role_id, module, action])
+  @@map("role_permissions")
+}
+
+model Team {
+  id         Int       @id @default(autoincrement())
+  company_id Int
+  name       String    @db.VarChar(128)
+  manager_id Int?
+  lead_id    Int?
+  is_active  Boolean   @default(true)
+  created_at DateTime  @default(now())
+  updated_at DateTime  @updatedAt
+  deleted_at DateTime?
+
+  company Company @relation(fields: [company_id], references: [id])
+  members User[]  @relation("TeamMembers")
+
+  @@index([company_id])
+  @@map("teams")
+}
+
+model User {
+  id                   Int       @id @default(autoincrement())
+  company_id           Int?
+  role_id              Int
+  team_id              Int?
+  reports_to_id        Int?
+  name                 String    @db.VarChar(191)
+  email                String    @unique @db.VarChar(191)
+  mobile               String?   @db.VarChar(32)
+  password_hash        String    @db.VarChar(255)
+  avatar_url           String?   @db.VarChar(500)
+  designation          String?   @db.VarChar(128)
+  is_active            Boolean   @default(true)
+  must_change_password Boolean   @default(false)
+  last_login_at        DateTime?
+  last_login_ip        String?   @db.VarChar(64)
+  failed_login_count   Int       @default(0)
+  locked_until         DateTime?
+  password_changed_at  DateTime?
+  whatsapp_status      String    @default("disconnected") @db.VarChar(32)
+  preferences          Json?
+  created_at           DateTime  @default(now())
+  updated_at           DateTime  @updatedAt
+  deleted_at           DateTime?
+
+  company Company? @relation(fields: [company_id], references: [id])
+  role    Role     @relation(fields: [role_id], references: [id])
+  team    Team?    @relation("TeamMembers", fields: [team_id], references: [id])
+
+  @@index([company_id])
+  @@index([role_id])
+  @@index([team_id])
+  @@index([reports_to_id])
+  @@map("users")
+}
+
+model UserSession {
+  id           Int       @id @default(autoincrement())
+  user_id      Int
+  token_id     String    @unique @db.VarChar(64)
+  ip           String?   @db.VarChar(64)
+  user_agent   String?   @db.VarChar(500)
+  created_at   DateTime  @default(now())
+  last_seen_at DateTime  @default(now())
+  expires_at   DateTime
+  revoked_at   DateTime?
+
+  @@index([user_id])
+  @@map("user_sessions")
+}
+
+/// Email OTPs for password reset / login verification
+model OtpToken {
+  id          Int       @id @default(autoincrement())
+  user_id     Int
+  purpose     String    @db.VarChar(32)
+  code_hash   String    @db.VarChar(255)
+  attempts    Int       @default(0)
+  expires_at  DateTime
+  consumed_at DateTime?
+  created_at  DateTime  @default(now())
+
+  @@index([user_id, purpose])
+  @@map("otp_tokens")
+}
+
+// ───────────────────────────── Masters / Configuration ─────────────────────────────
+
+model LeadStatus {
+  id                  Int      @id @default(autoincrement())
+  company_id          Int?
+  name                String   @db.VarChar(128)
+  color               String   @default("#3B82F6") @db.VarChar(16)
+  sort_order          Int      @default(0)
+  category            String   @default("open") @db.VarChar(16) /// open|won|lost|invalid
+  requires_reason     Boolean  @default(false)
+  auto_followup_hours Int?
+  allowed_next_ids    Json?
+  is_active           Boolean  @default(true)
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  sub_statuses LeadSubStatus[]
+
+  @@index([company_id])
+  @@map("lead_statuses")
+}
+
+model LeadSubStatus {
+  id         Int      @id @default(autoincrement())
+  status_id  Int
+  name       String   @db.VarChar(128)
+  sort_order Int      @default(0)
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now())
+
+  status LeadStatus @relation(fields: [status_id], references: [id], onDelete: Cascade)
+
+  @@index([status_id])
+  @@map("lead_sub_statuses")
+}
+
+model LeadSource {
+  id         Int      @id @default(autoincrement())
+  company_id Int?
+  name       String   @db.VarChar(128)
+  code       String?  @db.VarChar(64)
+  color      String?  @db.VarChar(16)
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([company_id])
+  @@map("lead_sources")
+}
+
+/// Generic lookup master: property_type, loss_reason, document_category, activity_type,
+/// project_status, process_type, purpose, priority, meeting_type, client_stage …
+model Lookup {
+  id         Int      @id @default(autoincrement())
+  company_id Int?
+  type       String   @db.VarChar(64)
+  name       String   @db.VarChar(128)
+  value      String?  @db.VarChar(128)
+  color      String?  @db.VarChar(16)
+  sort_order Int      @default(0)
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now())
+
+  @@index([type, company_id])
+  @@map("lookups")
+}
+
+model CustomField {
+  id         Int      @id @default(autoincrement())
+  company_id Int?
+  module     String   @db.VarChar(64) /// lead|client|project|property
+  key        String   @db.VarChar(64)
+  label      String   @db.VarChar(128)
+  field_type String   @default("text") @db.VarChar(32) /// text|number|date|select|textarea|checkbox
+  options    Json?
+  required   Boolean  @default(false)
+  sort_order Int      @default(0)
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now())
+
+  @@index([module, company_id])
+  @@map("custom_fields")
+}
+
+model Setting {
+  id         Int      @id @default(autoincrement())
+  company_id Int?
+  key        String   @db.VarChar(128)
+  value      Json?
+  updated_at DateTime @updatedAt
+
+  @@unique([company_id, key])
+  @@map("settings")
+}
+
+// ───────────────────────────── Locations ─────────────────────────────
+
+model Country {
+  id        Int     @id @default(autoincrement())
+  name      String  @db.VarChar(128)
+  iso_code  String? @db.VarChar(8)
+  is_active Boolean @default(true)
+
+  states State[]
+
+  @@map("countries")
+}
+
+model State {
+  id         Int     @id @default(autoincrement())
+  country_id Int
+  name       String  @db.VarChar(128)
+  is_active  Boolean @default(true)
+
+  country Country @relation(fields: [country_id], references: [id])
+  cities  City[]
+
+  @@index([country_id])
+  @@map("states")
+}
+
+model City {
+  id        Int     @id @default(autoincrement())
+  state_id  Int
+  name      String  @db.VarChar(128)
+  is_active Boolean @default(true)
+
+  state State  @relation(fields: [state_id], references: [id])
+  areas Area[]
+
+  @@index([state_id])
+  @@map("cities")
+}
+
+model Area {
+  id        Int      @id @default(autoincrement())
+  city_id   Int
+  name      String   @db.VarChar(191)
+  pincode   String?  @db.VarChar(16)
+  latitude  Decimal? @db.Decimal(10, 7)
+  longitude Decimal? @db.Decimal(10, 7)
+  tags      String?  @db.VarChar(500)
+  is_active Boolean  @default(true)
+
+  city City @relation(fields: [city_id], references: [id])
+
+  @@index([city_id])
+  @@map("areas")
+}
+
+// ───────────────────────────── Processes / Projects / Properties ─────────────────────────────
+
+model Process {
+  id          Int       @id @default(autoincrement())
+  company_id  Int
+  name        String    @db.VarChar(191)
+  type        String?   @db.VarChar(64)
+  description String?   @db.Text
+  is_active   Boolean   @default(true)
+  created_by  Int?
+  created_at  DateTime  @default(now())
+  updated_at  DateTime  @updatedAt
+  deleted_at  DateTime?
+
+  company  Company   @relation(fields: [company_id], references: [id])
+  projects Project[]
+
+  @@index([company_id])
+  @@map("processes")
+}
+
+model Project {
+  id            Int       @id @default(autoincrement())
+  company_id    Int
+  process_id    Int?
+  name          String    @db.VarChar(191)
+  code          String?   @db.VarChar(64)
+  developer     String?   @db.VarChar(191)
+  status        String    @default("Active") @db.VarChar(64)
+  country_id    Int?
+  state_id      Int?
+  city_id       Int?
+  area_id       Int?
+  address       String?   @db.Text
+  map_link      String?   @db.VarChar(500)
+  description   String?   @db.Text
+  price_min     Decimal?  @db.Decimal(16, 2)
+  price_max     Decimal?  @db.Decimal(16, 2)
+  contact_name  String?   @db.VarChar(191)
+  contact_phone String?   @db.VarChar(32)
+  sales_notes   String?   @db.Text
+  faqs          Json?
+  team_user_ids Json?
+  custom_fields Json?
+  is_active     Boolean   @default(true)
+  created_by    Int?
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @updatedAt
+  deleted_at    DateTime?
+
+  company    Company    @relation(fields: [company_id], references: [id])
+  process    Process?   @relation(fields: [process_id], references: [id])
+  properties Property[]
+
+  @@index([company_id])
+  @@index([process_id])
+  @@map("projects")
+}
+
+model Property {
+  id            Int       @id @default(autoincrement())
+  company_id    Int
+  project_id    Int
+  code          String    @db.VarChar(64)
+  unit_no       String?   @db.VarChar(64)
+  property_type String?   @db.VarChar(64)
+  size          Decimal?  @db.Decimal(14, 2)
+  size_unit     String    @default("sq.ft") @db.VarChar(16)
+  facing        String?   @db.VarChar(32)
+  floor         String?   @db.VarChar(32)
+  bedrooms      Int?
+  bathrooms     Int?
+  base_price    Decimal?  @db.Decimal(16, 2)
+  offer_price   Decimal?  @db.Decimal(16, 2)
+  price_status  String?   @db.VarChar(64)
+  availability  String    @default("Available") @db.VarChar(32) /// Available|Hold|Reserved|Booked|Sold|Blocked
+  attributes    Json?
+  description   String?   @db.Text
+  created_by    Int?
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @updatedAt
+  deleted_at    DateTime?
+
+  project Project @relation(fields: [project_id], references: [id])
+
+  @@index([company_id])
+  @@index([project_id])
+  @@map("properties")
+}
+
+// ───────────────────────────── Leads & Sales ─────────────────────────────
+
+model Lead {
+  id                 Int       @id @default(autoincrement())
+  code               String    @unique @db.VarChar(32)
+  company_id         Int
+  process_id         Int?
+  project_id         Int?
+  property_id        Int?
+  source_id          Int?
+  sub_source         String?   @db.VarChar(191)
+  campaign           String?   @db.VarChar(191)
+  ad_set             String?   @db.VarChar(191)
+  ad_name            String?   @db.VarChar(191)
+  name               String    @db.VarChar(191)
+  mobile             String    @db.VarChar(32)
+  alt_mobile         String?   @db.VarChar(32)
+  email              String?   @db.VarChar(191)
+  whatsapp_available Boolean   @default(true)
+  city               String?   @db.VarChar(128)
+  state              String?   @db.VarChar(128)
+  country            String?   @db.VarChar(128)
+  preferred_location String?   @db.VarChar(191)
+  property_type      String?   @db.VarChar(64)
+  budget_min         Decimal?  @db.Decimal(16, 2)
+  budget_max         Decimal?  @db.Decimal(16, 2)
+  purpose            String?   @db.VarChar(64)
+  requirement        String?   @db.Text
+  assigned_to_id     Int?
+  team_id            Int?
+  priority           String    @default("Warm") @db.VarChar(16) /// Hot|Warm|Cold
+  status_id          Int?
+  sub_status_id      Int?
+  loss_reason        String?   @db.VarChar(191)
+  next_followup_at   DateTime?
+  next_action        String?   @db.VarChar(255)
+  last_activity_at   DateTime?
+  reminder_minutes   Int       @default(15)
+  notes              String?   @db.Text
+  custom_fields      Json?
+  is_duplicate       Boolean   @default(false)
+  duplicate_of_id    Int?
+  import_job_id      Int?
+  external_id        String?   @db.VarChar(191)
+  client_id          Int?
+  converted_at       DateTime?
+  created_by         Int?
+  updated_by         Int?
+  created_at         DateTime  @default(now())
+  updated_at         DateTime  @updatedAt
+  deleted_at         DateTime?
+
+  company Company @relation(fields: [company_id], references: [id])
+
+  @@index([company_id, deleted_at])
+  @@index([assigned_to_id])
+  @@index([status_id])
+  @@index([source_id])
+  @@index([project_id])
+  @@index([mobile])
+  @@index([email])
+  @@index([next_followup_at])
+  @@index([import_job_id])
+  @@index([created_at])
+  @@map("leads")
+}
+
+/// Unified timeline for leads and clients
+model Activity {
+  id          Int      @id @default(autoincrement())
+  company_id  Int
+  lead_id     Int?
+  client_id   Int?
+  user_id     Int?
+  type        String   @db.VarChar(32) /// call|whatsapp|sms|email|note|followup|status|assignment|visit|meeting|document|conversion|system
+  title       String   @db.VarChar(255)
+  description String?  @db.Text
+  meta        Json?
+  is_internal Boolean  @default(true)
+  is_pinned   Boolean  @default(false)
+  created_at  DateTime @default(now())
+
+  @@index([lead_id, created_at])
+  @@index([client_id, created_at])
+  @@index([company_id, created_at])
+  @@index([user_id])
+  @@map("activities")
+}
+
+model FollowUp {
+  id               Int       @id @default(autoincrement())
+  company_id       Int
+  lead_id          Int?
+  client_id        Int?
+  assigned_to_id   Int
+  due_at           DateTime
+  reminder_minutes Int       @default(15)
+  reminder_sent_at DateTime?
+  type             String    @default("call") @db.VarChar(32)
+  priority         String    @default("Warm") @db.VarChar(16)
+  status           String    @default("pending") @db.VarChar(16) /// pending|completed|cancelled
+  outcome          String?   @db.VarChar(64)
+  notes            String?   @db.Text
+  completed_at     DateTime?
+  escalated_at     DateTime?
+  created_by       Int?
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  @@index([company_id, status, due_at])
+  @@index([assigned_to_id, status, due_at])
+  @@index([lead_id])
+  @@index([client_id])
+  @@map("follow_ups")
+}
+
+model Visit {
+  id               Int       @id @default(autoincrement())
+  company_id       Int
+  lead_id          Int?
+  client_id        Int?
+  project_id       Int?
+  property_id      Int?
+  agent_id         Int
+  scheduled_at     DateTime
+  location         String?   @db.VarChar(500)
+  map_link         String?   @db.VarChar(500)
+  attendees        String?   @db.VarChar(500)
+  status           String    @default("Scheduled") @db.VarChar(32) /// Scheduled|Confirmed|Rescheduled|Completed|Cancelled|No Show
+  outcome          String?   @db.VarChar(191)
+  notes            String?   @db.Text
+  reminder_minutes Int       @default(60)
+  reminder_sent_at DateTime?
+  created_by       Int?
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  @@index([company_id, scheduled_at])
+  @@index([agent_id, scheduled_at])
+  @@index([lead_id])
+  @@index([client_id])
+  @@index([project_id])
+  @@map("visits")
+}
+
+model Meeting {
+  id               Int       @id @default(autoincrement())
+  company_id       Int
+  lead_id          Int?
+  client_id        Int?
+  project_id       Int?
+  host_id          Int
+  title            String    @db.VarChar(255)
+  mode             String    @default("offline") @db.VarChar(16) /// offline|online
+  purpose          String?   @db.VarChar(255)
+  scheduled_at     DateTime
+  duration_minutes Int       @default(30)
+  meeting_link     String?   @db.VarChar(500)
+  location         String?   @db.VarChar(500)
+  attendees        String?   @db.VarChar(500)
+  status           String    @default("Scheduled") @db.VarChar(32)
+  outcome          String?   @db.VarChar(191)
+  notes            String?   @db.Text
+  next_action      String?   @db.VarChar(255)
+  reminder_minutes Int       @default(30)
+  reminder_sent_at DateTime?
+  created_by       Int?
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  @@index([company_id, scheduled_at])
+  @@index([host_id, scheduled_at])
+  @@index([lead_id])
+  @@index([client_id])
+  @@map("meetings")
+}
+
+model Client {
+  id              Int       @id @default(autoincrement())
+  code            String    @unique @db.VarChar(32)
+  company_id      Int
+  lead_id         Int?      @unique
+  project_id      Int?
+  property_id     Int?
+  assigned_to_id  Int?
+  name            String    @db.VarChar(191)
+  mobile          String    @db.VarChar(32)
+  alt_mobile      String?   @db.VarChar(32)
+  email           String?   @db.VarChar(191)
+  address         String?   @db.Text
+  city            String?   @db.VarChar(128)
+  stage           String    @default("Onboarding Pending") @db.VarChar(64)
+  booking_date    DateTime?
+  booking_amount  Decimal?  @db.Decimal(16, 2)
+  deal_value      Decimal?  @db.Decimal(16, 2)
+  payment_plan    String?   @db.VarChar(191)
+  source_id       Int?
+  referral        String?   @db.VarChar(191)
+  notes           String?   @db.Text
+  custom_fields   Json?
+  onboarding_data Json?
+  created_by      Int?
+  updated_by      Int?
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @updatedAt
+  deleted_at      DateTime?
+
+  company Company @relation(fields: [company_id], references: [id])
+
+  @@index([company_id, deleted_at])
+  @@index([assigned_to_id])
+  @@index([project_id])
+  @@map("clients")
+}
+
+// ───────────────────────────── Documents ─────────────────────────────
+
+model Document {
+  id           Int       @id @default(autoincrement())
+  company_id   Int
+  project_id   Int?
+  property_id  Int?
+  client_id    Int?
+  lead_id      Int?
+  category     String    @default("General") @db.VarChar(64)
+  title        String    @db.VarChar(255)
+  file_name    String    @db.VarChar(255)
+  mime_type    String?   @db.VarChar(128)
+  size_bytes   Int       @default(0)
+  storage_path String    @db.VarChar(500)
+  version      Int       @default(1)
+  parent_id    Int?
+  status       String    @default("Uploaded") @db.VarChar(32) /// Uploaded|Pending|Verified|Rejected|Archived
+  is_sensitive Boolean   @default(false)
+  expires_at   DateTime?
+  uploaded_by  Int?
+  created_at   DateTime  @default(now())
+  updated_at   DateTime  @updatedAt
+  deleted_at   DateTime?
+
+  @@index([company_id])
+  @@index([project_id])
+  @@index([client_id])
+  @@index([lead_id])
+  @@map("documents")
+}
+
+model DocumentShare {
+  id          Int       @id @default(autoincrement())
+  document_id Int
+  lead_id     Int?
+  client_id   Int?
+  channel     String    @db.VarChar(16) /// whatsapp|email|link
+  recipient   String?   @db.VarChar(191)
+  share_token String?   @unique @db.VarChar(64)
+  expires_at  DateTime?
+  shared_by   Int?
+  created_at  DateTime  @default(now())
+
+  @@index([document_id])
+  @@index([lead_id])
+  @@map("document_shares")
+}
+
+// ───────────────────────────── Forms ─────────────────────────────
+
+model Form {
+  id              Int       @id @default(autoincrement())
+  company_id      Int
+  name            String    @db.VarChar(191)
+  slug            String    @unique @db.VarChar(128)
+  form_type       String    @default("lead_capture") @db.VarChar(64)
+  description     String?   @db.Text
+  fields          Json
+  destination     String    @default("lead") @db.VarChar(32) /// lead|client|none
+  project_id      Int?
+  process_id      Int?
+  source_id       Int?
+  assign_to_id    Int?
+  success_message String?   @db.VarChar(500)
+  version         Int       @default(1)
+  is_active       Boolean   @default(true)
+  views           Int       @default(0)
+  created_by      Int?
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @updatedAt
+  deleted_at      DateTime?
+
+  @@index([company_id])
+  @@map("forms")
+}
+
+model FormSubmission {
+  id           Int      @id @default(autoincrement())
+  form_id      Int
+  form_version Int      @default(1)
+  company_id   Int
+  data         Json
+  lead_id      Int?
+  client_id    Int?
+  status       String   @default("Submitted") @db.VarChar(32)
+  ip           String?  @db.VarChar(64)
+  user_agent   String?  @db.VarChar(500)
+  created_at   DateTime @default(now())
+
+  @@index([form_id, created_at])
+  @@index([company_id])
+  @@map("form_submissions")
+}
+
+// ───────────────────────────── Notifications, Import/Export, Audit, Views ─────────────────────────────
+
+model Notification {
+  id         Int       @id @default(autoincrement())
+  user_id    Int
+  company_id Int?
+  type       String    @db.VarChar(64)
+  title      String    @db.VarChar(255)
+  body       String?   @db.Text
+  link       String?   @db.VarChar(500)
+  is_read    Boolean   @default(false)
+  read_at    DateTime?
+  emailed_at DateTime?
+  created_at DateTime  @default(now())
+
+  @@index([user_id, is_read, created_at])
+  @@map("notifications")
+}
+
+model ImportJob {
+  id              Int      @id @default(autoincrement())
+  company_id      Int
+  module          String   @default("leads") @db.VarChar(32)
+  file_name       String   @db.VarChar(255)
+  mode            String   @default("append") @db.VarChar(16) /// append|update|replace
+  match_key       String?  @db.VarChar(32)
+  mapping         Json?
+  defaults        Json?
+  total_rows      Int      @default(0)
+  success_count   Int      @default(0)
+  failed_count    Int      @default(0)
+  duplicate_count Int      @default(0)
+  status          String   @default("Pending") @db.VarChar(32) /// Pending|Completed|Failed|Rolled Back
+  errors          Json?
+  uploaded_by     Int?
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  @@index([company_id, created_at])
+  @@map("import_jobs")
+}
+
+model ExportLog {
+  id           Int      @id @default(autoincrement())
+  company_id   Int?
+  user_id      Int
+  module       String   @db.VarChar(32)
+  filters      Json?
+  columns      Json?
+  record_count Int      @default(0)
+  format       String   @default("xlsx") @db.VarChar(8)
+  created_at   DateTime @default(now())
+
+  @@index([company_id, created_at])
+  @@map("export_logs")
+}
+
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  company_id Int?
+  user_id    Int?
+  action     String   @db.VarChar(64)
+  entity     String   @db.VarChar(64)
+  entity_id  Int?
+  summary    String?  @db.VarChar(500)
+  changes    Json?
+  ip         String?  @db.VarChar(64)
+  created_at DateTime @default(now())
+
+  @@index([company_id, created_at])
+  @@index([entity, entity_id])
+  @@index([user_id])
+  @@map("audit_logs")
+}
+
+model SavedView {
+  id         Int      @id @default(autoincrement())
+  user_id    Int
+  company_id Int?
+  module     String   @db.VarChar(32)
+  name       String   @db.VarChar(128)
+  filters    Json?
+  columns    Json?
+  visibility String   @default("personal") @db.VarChar(16) /// personal|team|company
+  is_default Boolean  @default(false)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([user_id, module])
+  @@map("saved_views")
+}
+
+model DashboardLayout {
+  id         Int      @id @default(autoincrement())
+  user_id    Int?
+  role_key   String?  @db.VarChar(64)
+  name       String   @default("My Dashboard") @db.VarChar(128)
+  cards      Json
+  is_default Boolean  @default(false)
+  updated_at DateTime @updatedAt
+
+  @@index([user_id])
+  @@map("dashboard_layouts")
+}
+
+model MessageTemplate {
+  id         Int      @id @default(autoincrement())
+  company_id Int?
+  channel    String   @default("whatsapp") @db.VarChar(16) /// whatsapp|email|sms
+  name       String   @db.VarChar(128)
+  subject    String?  @db.VarChar(255)
+  body       String   @db.Text
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now())
+
+  @@index([company_id])
+  @@map("message_templates")
+}

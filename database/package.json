@@ -1,0 +1,14 @@
+{
+  "name": "darpan-crm-database",
+  "private": true,
+  "scripts": {
+    "db:push": "dotenv -e ../.env -- prisma db push --skip-generate",
+    "db:studio": "dotenv -e ../.env -- prisma studio",
+    "db:format": "prisma format",
+    "db:validate": "dotenv -e ../.env -- prisma validate"
+  },
+  "devDependencies": {
+    "dotenv-cli": "^8.0.0",
+    "prisma": "^6.19.0"
+  }
+}
