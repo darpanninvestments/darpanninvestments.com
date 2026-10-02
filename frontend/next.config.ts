@@ -43,6 +43,9 @@ const nextConfig: NextConfig = {
       { source: "/f/:path*", headers: [...common, { key: "Content-Security-Policy", value: csp("*") }] },
     ];
   },
+  // Our only images are small static brand PNGs; serve them directly. (The /_next/image optimizer
+  // route isn't available when the frontend runs as a Vercel Service, which caused 404s.)
+  images: { unoptimized: true },
   experimental: { proxyClientMaxBodySize: "30mb" },
   poweredByHeader: false,
 };
